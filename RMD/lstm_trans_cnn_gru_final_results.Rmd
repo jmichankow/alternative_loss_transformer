@@ -576,13 +576,35 @@ Interactive evaluation:
 ```{r eval = F}
 e1 <- as.data.frame(eq_r[[2]])[, "eql_tran"]
 e2 <- as.data.frame(eq_r[[2]])[, "eql_lstm"]
+e3 <- as.data.frame(eq_r[[2]])[, "eql_cnn"]
+e4 <- as.data.frame(eq_r[[2]])[, "eql_gru"]
+e5 <- as.data.frame(eq_r[[2]])[, "Close"]
 if (0) {
   r1 <- diff(log(e1))
   r2 <- diff(log(e2))
+  r3 <- diff(log(e3))
+  r4 <- diff(log(e4))
+  r5 <- diff(log(e5))
 } else {
   r1 <- diff(e1)/lag(e1)[-1]
   r2 <- diff(e2)/lag(e2)[-1]
+  r3 <- diff(e3)/lag(e3)[-1]
+  r4 <- diff(e4)/lag(e4)[-1]
+  r5 <- diff(e5)/lag(e5)[-1]
 }
+
+library(SharpeR)
+sr_test(
+  r1, r4, zeta = 2, ope = 365,
+  alternative = "two.sided")[c("statistic", "p.value")]
+
+
+library(MCS)
+loss <- -cbind(r1, r2, r3, r4, r5) 
+mcs <- MCSprocedure(loss, alpha = 0.05, B = 5000)
+summary(mcs)
+
+
 
 tibble(r1, r2) |> 
   ggplot(aes(r1, r2)) +
