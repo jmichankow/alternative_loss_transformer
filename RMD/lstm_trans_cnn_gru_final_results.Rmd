@@ -1,0 +1,669 @@
+---
+title: "LSTM vs Transformer vs CNN vs GRU"
+subtitle: "strategies estimated on returns"
+author: "Jakub Michańków, Paweł Sakowski, Robert Ślepaczuk"
+date: "`r Sys.time()`"
+output: 
+  html_document:
+    number_sections: false
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F, warning = F, error = F, message = F, cache = F, 
+                      fig.width = 9, fig.height = 4.5)
+options(knitr.kable.NA = '')
+```
+
+
+# 0 Parameters
+
+General assumptions:
+
+* Instruments:
+    * `SPX`
+    * `BTC`
+    * `ETC`
+    * `JPM`
+    * `LTC`
+    * `XOM`
+* DFL = 1 
+* *out-of-sample* forecasts: 1 day ahead
+* transactions costs = 0.05%
+* `solver = "hybrid"`, `solver.control = list(tol = 1e-7)`
+
+```{r cache = F}
+library(tidyverse)
+library(here)
+library(forecast)
+library(xts)
+library(kableExtra)
+library(gridExtra)
+library(feather)
+library(formattable)
+```
+
+
+```{r echo = F, include = F, eval = F}
+# defining functions (Linux)
+dir(here("FUNS"), full.names = T) %>%
+  #.[substr(., 65, 68) == "fun_"] %>%
+  .[substr(., 103, 106) == "fun_"] %>%
+  map(~ source(.))
+```
+
+```{r echo = F, include = F, eval = F}
+# defining functions (Windows)
+dir(here("FUNS"), full.names = T) %>%
+  .[substr(., 62, 65) == "fun_"] %>%
+  map(~ source(.))
+```
+
+```{r echo = F, include = F, eval = T}
+# defining functions (Mac)
+dir(here("FUNS"), full.names = T) %>%
+  .[substr(., 65, 68) == "fun_"] %>%
+  map(~ source(.))
+```
+
+
+```{r}
+# preparing LSTM results
+# do wyników uwzględniamy: signal_long, eql_lo
+filenames <- dir(here("EXPORTS"), full.names = T)
+eq_lstm <- 
+  filenames[substr(filenames, 67 + 10, 67 + 13) == "lstm"] %>% 
+  map(~read_feather(.)) %>%
+  map(~ .x %>% rename(signal_lstm = signal_long, eql_lstm = eql_lo, Close = eql_bh)) %>%
+  map(~ .x %>% select(Date, signal_lstm, eql_lstm, Close)) %>%
+  setNames(filenames[substr(filenames, 67 + 10, 67 + 13) == "lstm"] %>% 
+             substr(., 67 + 1, 67 + 13))
+eq_tran <- 
+  filenames[substr(filenames, 67 + 10, 67 + 13) == "tran"] %>% 
+  map(~read_feather(.)) %>%
+  map(~ .x %>% rename(signal_tran = signal_long, eql_tran = eql_lo)) %>%
+  map(~ .x %>% select(Date, signal_tran, eql_tran)) %>%
+  setNames(filenames[substr(filenames, 67 + 10, 67 + 13) == "tran"] %>% 
+             substr(., 67 + 1, 67 + 13))
+eq_cnn <- 
+  filenames[substr(filenames, 67 + 10, 67 + 12) == "cnn"] %>% 
+  map(~read_feather(.)) %>%
+  map(~ .x %>% rename(signal_cnn = signal_long, eql_cnn = eql_lo)) %>%
+  map(~ .x %>% select(Date, signal_cnn, eql_cnn)) %>%
+  setNames(filenames[substr(filenames, 67 + 10, 67 + 12) == "cnn"] %>% 
+             substr(., 67 + 1, 67 + 12))
+eq_gru <- 
+  filenames[substr(filenames, 67 + 10, 67 + 12) == "gru"] %>% 
+  map(~read_feather(.)) %>%
+  map(~ .x %>% rename(signal_gru = signal_long, eql_gru = eql_lo)) %>%
+  map(~ .x %>% select(Date, signal_gru, eql_gru)) %>%
+  setNames(filenames[substr(filenames, 67 + 10, 67 + 12) == "gru"] %>% 
+             substr(., 67 + 1, 67 + 12))
+```
+
+
+```{r}
+# merging equity lines based on AIC
+eq_r <-
+  eq_lstm |> 
+   #map(~ .x %>% select(Date, Close, starts_with(c("eql", "signal")))) |> 
+  map2(
+    eq_tran,
+    ~ .x |> left_join(.y,by = "Date")
+  ) |> 
+  map2(
+    eq_cnn,
+    ~ .x |> left_join(.y,by = "Date")
+  ) |> 
+  map2(
+    eq_gru,
+    ~ .x |> left_join(.y,by = "Date")
+  ) |> 
+  setNames(names(eq_lstm) %>% substr(1, 3))
+
+# verification
+if (0) {
+  eq_r %>% map(head)
+  eq_r %>% map(tail, 1)
+  eq_r %>% map_dfr(head, 1, .id = "name") |> rename(first_date = Date)
+  eq_r %>% map_dfr(tail, 1, .id = "name") |> rename(last_date = Date)
+}
+
+# removing 1Y of data at the beginning
+if (0) {
+  eq_r <-
+  eq_r %>%
+  map(
+    ~ .x %>% 
+      mutate(first_date_diff = 
+               difftime(Date, Date[1], units = "days") %>% as.numeric()) %>%
+      filter(first_date_diff >= 365) %>%
+      select(-first_date_diff) 
+    )
+}
+
+# verification
+if (0) {
+  eq_r %>% map(head)
+  eq_r %>% map(tail)
+}
+
+# correcting equity lines to start with the same value as instrument price
+eq_r <-
+  eq_r %>%
+  map(
+    ~ .x %>%
+      mutate(eql_tran = eql_tran / eql_tran[1] * Close[1],
+             eql_lstm = eql_lstm / eql_lstm[1] * Close[1],
+             eql_cnn  = eql_cnn  / eql_cnn[1]  * Close[1],
+             eql_gru  = eql_gru  / eql_gru[1]  * Close[1])
+  )
+
+# verification
+if (0) {
+  eq_r %>% map(head)
+  eq_r %>% map(tail)
+}
+
+# removing observations after 2024-10-24
+if (1) {
+  eq_r <-
+  eq_r %>%
+  map(~ .x %>% filter(Date <= "2024-10-24"))
+}
+ 
+```
+
+
+# 4 Results for the Base Case Scenario
+
+## 4.1 Individual and ensemble strategies for one asset
+
+```{r}
+strategies <- c("eql_lstm", "eql_tran", "eql_cnn", "eql_gru")
+signals    <- c("signal_lstm", "signal_tran", "signal_cnn", "signal_gru")
+```
+
+### plots {.tabset}
+
+#### long
+```{r eval = T, fig.height = 19, fig.width = 18}
+p1 <- get_eql_plot(eq_r, 1, include_title = T, logPlot = T, accuracy = 1,
+             legX = 0.9, legY = 0.35, strategies = strategies)
+p2 <- get_eql_plot(eq_r, 2, include_title = T, logPlot = F, 
+             legX = 0.1, legY = 0.7, strategies = strategies)
+p3 <- get_eql_plot(eq_r, 3, include_title = T, logPlot = F, 
+             legX = 0.1, legY = 0.7, strategies = strategies)
+p4 <- get_eql_plot(eq_r, 4, include_title = T, logPlot = F, 
+             legX = 0.1, legY = 0.7, strategies = strategies)
+p5 <- get_eql_plot(eq_r, 5, include_title = T, logPlot = F, 
+             legX = 0.1, legY = 0.7, strategies = strategies)
+p6 <- get_eql_plot(eq_r, 6, include_title = T, logPlot = F, 
+             legX = 0.1, legY = 0.7, strategies = strategies)
+
+grid.arrange(p1, p2, p4, p3, p5, p6, ncol = 1)
+```
+
+#### wide
+```{r eval = T, fig.height = 11.4, fig.width = 18}
+p1 <- get_eql_plot(eq_r, 1, include_title = T, logPlot = T, accuracy = 1,
+             legX = 0.1, legY = 0.7, strategies = strategies)
+p2 <- get_eql_plot(eq_r, 2, include_title = T, logPlot = F, 
+             legX = 0.1, legY = 0.7, strategies = strategies)
+p3 <- get_eql_plot(eq_r, 3, include_title = T, logPlot = F, 
+             legX = 0.1, legY = 0.7, strategies = strategies)
+p4 <- get_eql_plot(eq_r, 4, include_title = T, logPlot = F, 
+             legX = 0.1, legY = 0.7, strategies = strategies)
+p5 <- get_eql_plot(eq_r, 5, include_title = T, logPlot = F, 
+             legX = 0.1, legY = 0.7, strategies = strategies)
+p6 <- get_eql_plot(eq_r, 6, include_title = T, logPlot = F, 
+             legX = 0.1, legY = 0.7, strategies = strategies)
+
+# grid.arrange(p1, p2, p4, p3, p5, p6, nrow = 3)
+# grid.arrange(p1, p3, p2, p5, p4, p6, nrow = 3)
+grid.arrange(p3, p1, p5, p2, p6, p4, nrow = 3)
+ggsave("eql_wide.pdf", width = 18, height = 11.4, dpi = 300)
+```
+
+#### wide 2
+```{r eval = T, fig.height = 9.2, fig.width = 18}
+p1 <- get_eql_plot(eq_r, 1, include_title = T, logPlot = T, accuracy = 1,
+             legX = 0.8, legY = 0.37, strategies = strategies)
+p2 <- get_eql_plot(eq_r, 2, include_title = T, logPlot = F, 
+             legX = 0.1, legY = 0.7, strategies = strategies)
+p3 <- get_eql_plot(eq_r, 3, include_title = T, logPlot = F, 
+             legX = 0.1, legY = 0.7, strategies = strategies)
+p4 <- get_eql_plot(eq_r, 4, include_title = T, logPlot = F, 
+             legX = 0.1, legY = 0.7, strategies = strategies)
+p5 <- get_eql_plot(eq_r, 5, include_title = T, logPlot = F, 
+             legX = 0.1, legY = 0.7, strategies = strategies)
+p6 <- get_eql_plot(eq_r, 6, include_title = T, logPlot = F, 
+             legX = 0.1, legY = 0.7, strategies = strategies)
+
+# grid.arrange(p1, p2, p4, p3, p5, p6, nrow = 3)
+grid.arrange(p1, p3, p2, p5, p4, p6, nrow = 3)
+
+```
+
+
+### tables {.tabset}
+
+#### long
+
+```{r eval = T}
+table1 <-
+  get_stats_table(eq_r, 1, getKbl = F,
+                  strategies = strategies,
+                  signals = signals) %>%
+  bind_rows(
+    get_stats_table(eq_r, 2, getKbl = F,
+                    strategies = strategies,
+                    signals = signals) 
+  ) %>%
+  bind_rows(
+    get_stats_table(eq_r, 4, getKbl = F,
+                    strategies = strategies,
+                    signals = signals) 
+  ) %>%
+  bind_rows(
+    get_stats_table(eq_r, 3, getKbl = F,
+                    strategies = strategies,
+                    signals = signals) 
+  ) %>%
+  bind_rows(
+    get_stats_table(eq_r, 5, getKbl = F,
+                    strategies = strategies,
+                    signals = signals) 
+  ) |> 
+    bind_rows(
+    get_stats_table(eq_r, 6, getKbl = F,
+                    strategies = strategies,
+                    signals = signals) 
+  ) 
+
+# table1 %>% saveRDS(here("DATA/tran/tables/table1.rds"))
+
+table1 %>%
+  kbl(format = "html", row.names = T, 
+      digits = c(2, 2, 2, 2, 2, 3, 3, 0, 0), 
+      booktabs = F) %>%
+  # kable_styling(font_size = 8, latex_options = "hold_position") %>%
+  kable_styling(
+    bootstrap_options = c(# "striped",
+                          # "hover", 
+                          "condensed" 
+                          # "responsive"
+                          ),
+    font_size = 12, full_width = F
+    ) %>%
+  gsub("\\\\addlinespace", "", .) %>%
+  gsub("\\\\begingroup", "", .) %>%
+  gsub("\\\\endgroup\\{\\}", "", .) %>%
+  gsub("\\.\\.\\.[^ ]+\\ ", " ", .) %>%
+  gsub("\\\\begin\\{table\\}\\[\\!h\\]", "", .) %>%
+  gsub("\\\\end\\{table\\}", "", .) %>%
+  pack_rows("BTC", 1, 5) |> 
+  pack_rows("ETH", 6, 10) |> 
+  pack_rows("LTC", 11, 15) |> 
+  pack_rows("JPM", 16, 20) |> 
+  pack_rows("SPX", 21, 25) |> 
+  pack_rows("XOM", 26, 30)
+```
+
+```{r eval = FALSE}
+table1 %>%
+  kbl(format = "latex", row.names = T, 
+      digits = c(2, 2, 2, 2, 2, 3, 3, 0, 0), 
+      booktabs = F) %>%
+  # kable_styling(font_size = 8, latex_options = "hold_position") %>%
+  kable_styling(
+    bootstrap_options = c(# "striped",
+                          # "hover", 
+                          "condensed" 
+                          # "responsive"
+                          ),
+    font_size = 12, full_width = F
+    ) %>%
+  gsub("\\\\addlinespace", "", .) %>%
+  gsub("\\\\begingroup", "", .) %>%
+  gsub("\\\\endgroup\\{\\}", "", .) %>%
+  gsub("\\.\\.\\.[^ ]+\\ ", " ", .) %>%
+  gsub("\\\\begin\\{table\\}\\[\\!h\\]", "", .) %>%
+  gsub("\\\\end\\{table\\}", "", .) %>%
+  pack_rows("BTC", 1, 5) |> 
+  pack_rows("ETH", 6, 10) |> 
+  pack_rows("LTC", 11, 15) |> 
+  pack_rows("JPM", 16, 20) |> 
+  pack_rows("SPX", 21, 25) |> 
+  pack_rows("XOM", 26, 30)
+```
+
+
+#### wide 1
+
+```{r eval = T}
+table1_ <-
+  get_stats_table(eq_r, 1, getKbl = F,
+                  strategies = strategies,
+                  signals = signals) %>%
+  bind_rows(
+    get_stats_table(eq_r, 2, getKbl = F,
+                    strategies = strategies,
+                    signals = signals)
+  ) %>%
+  bind_rows(
+    get_stats_table(eq_r, 4, getKbl = F,
+                    strategies = strategies,
+                    signals = signals)
+  ) 
+
+table2_ <-
+  get_stats_table(eq_r, 3, getKbl = F,
+                    strategies = strategies,
+                    signals = signals) %>%
+  bind_rows(
+    get_stats_table(eq_r, 5, getKbl = F,
+                    strategies = strategies,
+                    signals = signals)
+  ) %>%
+  bind_rows(
+    get_stats_table(eq_r, 6, getKbl = F,
+                    strategies = strategies,
+                    signals = signals)
+  ) 
+
+table1_ %>%
+  kbl(format = "html", row.names = T, 
+      digits = c(2, 2, 2, 2, 2, 3, 3, 0, 0), 
+      booktabs = F) %>%
+  # kable_styling(font_size = 8, latex_options = "hold_position") %>%
+  kable_styling(
+    bootstrap_options = c(# "striped",
+                          # "hover", 
+                          "condensed" 
+                          # "responsive"
+                          ),
+    font_size = 12, full_width = F
+    ) %>%
+  gsub("\\\\addlinespace", "", .) %>%
+  gsub("\\\\begingroup", "", .) %>%
+  gsub("\\\\endgroup\\{\\}", "", .) %>%
+  gsub("\\.\\.\\.[^ ]+\\ ", " ", .) %>%
+  gsub("\\\\begin\\{table\\}\\[\\!h\\]", "", .) %>%
+  gsub("\\\\end\\{table\\}", "", .) %>%
+  pack_rows("BTC", 1, 5) %>%
+  pack_rows("ETH", 6, 10) %>%
+  pack_rows("LTC", 11, 15)
+
+table2_ %>%
+  kbl(format = "html", row.names = T, 
+      digits = c(2, 2, 2, 2, 2, 3, 3, 0, 0), 
+      booktabs = F) %>%
+  # kable_styling(font_size = 8, latex_options = "hold_position") %>%
+  kable_styling(
+    bootstrap_options = c(# "striped",
+                          # "hover", 
+                          "condensed" 
+                          # "responsive"
+                          ),
+    font_size = 12, full_width = F
+    ) %>%
+  gsub("\\\\addlinespace", "", .) %>%
+  gsub("\\\\begingroup", "", .) %>%
+  gsub("\\\\endgroup\\{\\}", "", .) %>%
+  gsub("\\.\\.\\.[^ ]+\\ ", " ", .) %>%
+  gsub("\\\\begin\\{table\\}\\[\\!h\\]", "", .) %>%
+  gsub("\\\\end\\{table\\}", "", .) %>%
+  pack_rows("JPM", 1, 5) %>%
+  pack_rows("SPX", 6, 10) |> 
+  pack_rows("XOM", 11, 15)
+```
+
+#### wide 2
+
+```{r eval = T}
+table1_ %>%
+  kbl(format = "html", row.names = T, 
+      digits = c(2, 2, 2, 2, 2, 3, 3, 0, 0), 
+      booktabs = F) %>%
+  # kable_styling(font_size = 8, latex_options = "hold_position") %>%
+  kable_styling(
+    bootstrap_options = c(# "striped",
+                          # "hover", 
+                          "condensed" 
+                          # "responsive"
+                          ),
+    font_size = 12, full_width = F
+    ) %>%
+  gsub("\\\\addlinespace", "", .) %>%
+  gsub("\\\\begingroup", "", .) %>%
+  gsub("\\\\endgroup\\{\\}", "", .) %>%
+  gsub("\\.\\.\\.[^ ]+\\ ", " ", .) %>%
+  gsub("\\\\begin\\{table\\}\\[\\!h\\]", "", .) %>%
+  gsub("\\\\end\\{table\\}", "", .) %>%
+  row_spec(c(1, 6, 11), bold = T, background = "#f5f5f5")
+
+table2_ %>%
+  kbl(format = "html", row.names = T, 
+      digits = c(2, 2, 2, 2, 2, 3, 3, 0, 0), 
+      booktabs = F) %>%
+  # kable_styling(font_size = 8, latex_options = "hold_position") %>%
+  kable_styling(
+    bootstrap_options = c(# "striped",
+                          # "hover", 
+                          "condensed" 
+                          # "responsive"
+                          ),
+    font_size = 12, full_width = F
+    ) %>%
+  gsub("\\\\addlinespace", "", .) %>%
+  gsub("\\\\begingroup", "", .) %>%
+  gsub("\\\\endgroup\\{\\}", "", .) %>%
+  gsub("\\.\\.\\.[^ ]+\\ ", " ", .) %>%
+  gsub("\\\\begin\\{table\\}\\[\\!h\\]", "", .) %>%
+  gsub("\\\\end\\{table\\}", "", .) %>%
+  row_spec(c(1, 6, 11), bold = T, background = "#f5f5f5")
+```
+
+### DM test
+
+Function definition:
+
+```{r eval = F}
+library(forecast)
+
+do_test3 <- function(dt, use_logret = T, use_DM = T) {
+  dt <- as.data.frame(dt)
+
+  # definition of retunrs
+  if (use_logret) {
+    r1 <- diff(log(dt[, 2]))
+    r2 <- diff(log(dt[, 3]))
+  } else {
+    r1 <- diff(dt[, 2])/(lag(dt[, 2])[-1])
+    r2 <- diff(dt[, 3])/(lag(dt[, 3])[-1])
+  }
+  
+  e1 <- r1
+  e2 <- r2
+  
+  # DM test or t-test
+  if (use_DM) {
+    result <- 
+      dm.test(e1, e2, alternative = "two.sided", h = 1, 
+      #varestimator = "bartlett",
+      power = 1       
+    )
+    result2 <- c(result$statistic, result$p.value) 
+  } else {
+    result <- t.test(e1, e2, alternative = "two.sided")
+    result2 <- c(result$stat, result$p.value)
+  }
+  
+  names(result2) <- c("stat", "pv")
+  return(result2)
+}
+```
+
+Calling function:
+
+```{r eval = F}
+
+use_logret = T
+use_DM = T
+
+# tran_bh
+dm_tran_bh <-
+  eq_r |> 
+  map(~. |> select(Date, Close, starts_with("eql"))) |> 
+  map(~. |> select(Date, contains("tran"), Close)) |> 
+  map(do_test3, use_logret, use_DM) 
+names(dm_tran_bh) <- paste0(names(dm_tran_bh), "_tran_bh")
+
+# tran_lstm
+dm_tran_lstm <-
+  eq_r |> 
+  map(~. |> select(Date, Close, starts_with("eql"))) |> 
+  map(~. |> select(Date, contains("tran"), contains("lstm"))) |> 
+  map(do_test3, use_logret, use_DM) 
+names(dm_tran_lstm) <- paste0(names(dm_tran_lstm), "_tran_lstm")
+
+# tran_cnn
+dm_tran_cnn <-
+  eq_r |> 
+  map(~. |> select(Date, Close, starts_with("eql"))) |> 
+  map(~. |> select(Date, contains("tran"), contains("cnn"))) |> 
+  map(do_test3, use_logret, use_DM) 
+names(dm_tran_cnn) <- paste0(names(dm_tran_cnn), "_tran_cnn")
+
+# tran_gru
+dm_tran_gru <-
+  eq_r |> 
+  map(~. |> select(Date, Close, starts_with("eql"))) |> 
+  map(~. |> select(Date, contains("tran"), contains("gru"))) |> 
+  map(do_test3, use_logret, use_DM) 
+names(dm_tran_gru) <- paste0(names(dm_tran_gru), "_tran_gru")
+
+# binding
+test_dt <- 
+  bind_rows(
+    dm_tran_bh %>% bind_rows(, .id = "strategy"), 
+    dm_tran_lstm %>% bind_rows(, .id = "strategy"), 
+    dm_tran_cnn %>% bind_rows(, .id = "strategy"), 
+    dm_tran_gru %>% bind_rows(, .id = "strategy"), 
+  )
+
+# pv
+test_dt |> 
+  select(strategy, pv) |> 
+  mutate(pv = round(pv, 4)) |> 
+  mutate(ticker = str_sub(strategy, 1, 3)) |> 
+  mutate(strategy = str_sub(strategy, 5, -1)) |> 
+  pivot_wider(names_from = ticker, values_from = pv)
+
+# stat
+test_dt |> 
+  select(strategy, stat) |> 
+  mutate(stat = round(stat, 4)) |> 
+  mutate(ticker = str_sub(strategy, 1, 3)) |> 
+  mutate(strategy = str_sub(strategy, 5, -1)) |> 
+  pivot_wider(names_from = ticker, values_from = stat)
+```
+
+Interactive evaluation:
+
+```{r eval = F}
+e1 <- as.data.frame(eq_r[[2]])[, "eql_tran"]
+e2 <- as.data.frame(eq_r[[2]])[, "eql_lstm"]
+if (0) {
+  r1 <- diff(log(e1))
+  r2 <- diff(log(e2))
+} else {
+  r1 <- diff(e1)/lag(e1)[-1]
+  r2 <- diff(e2)/lag(e2)[-1]
+}
+
+tibble(r1, r2) |> 
+  ggplot(aes(r1, r2)) +
+  geom_point()
+
+tibble(r1, r2) |> 
+  pivot_longer(everything()) |> 
+  ggplot(aes(value, name)) +
+  geom_boxplot()
+
+getPerformanceStats(e1)
+getPerformanceStats(e2)
+t.test(r1, r2)
+
+dm.test(r1, r2, power = 1)
+
+mean(r1)
+mean(r2)
+sd(r1)
+sd(r2)
+mean(r1)-mean(r2)
+mean(r1-r2)
+sd(r1-r2)
+
+tibble(r1, r2) |>
+  pivot_longer(everything()) |> 
+  ggplot(aes(value, fill = name)) +
+  geom_density(alpha = 0.4, bw= 0.01)
+```
+
+Additional tests: BH vs strategies
+
+```{r eval = F}
+# lstm_bh
+dm_lstm_bh <-
+  eq_r |> 
+  map(~. |> select(Date, Close, starts_with("eql"))) |> 
+  map(~. |> select(Date, contains("lstm"), Close)) |> 
+  map(do_test3, use_logret, use_DM) 
+names(dm_lstm_bh) <- paste0(names(dm_lstm_bh), "_lstm_bh")
+
+# cnn_bh
+dm_cnn_bh <-
+  eq_r |> 
+  map(~. |> select(Date, Close, starts_with("eql"))) |> 
+  map(~. |> select(Date, contains("cnn"), Close)) |> 
+  map(do_test3, use_logret, use_DM) 
+names(dm_cnn_bh) <- paste0(names(dm_cnn_bh), "_cnn_bh")
+
+# gru_bh
+dm_gru_bh <-
+  eq_r |> 
+  map(~. |> select(Date, Close, starts_with("eql"))) |> 
+  map(~. |> select(Date, contains("gru"), Close)) |> 
+  map(do_test3, use_logret, use_DM) 
+names(dm_gru_bh) <- paste0(names(dm_gru_bh), "_gru_bh")
+
+
+test_dt <- 
+  bind_rows(
+    dm_tran_bh %>% bind_rows(, .id = "strategy"), 
+    dm_lstm_bh %>% bind_rows(, .id = "strategy"), 
+    dm_cnn_bh  %>% bind_rows(, .id = "strategy"), 
+    dm_gru_bh  %>% bind_rows(, .id = "strategy"), 
+  )
+
+# pv
+test_dt |> 
+  select(strategy, pv) |> 
+  mutate(pv = round(pv, 4)) |> 
+  mutate(ticker = str_sub(strategy, 1, 3)) |> 
+  mutate(strategy = str_sub(strategy, 5, -1)) |> 
+  pivot_wider(names_from = ticker, values_from = pv)
+
+# stat
+test_dt |> 
+  select(strategy, stat) |> 
+  mutate(stat = round(stat, 4)) |> 
+  mutate(ticker = str_sub(strategy, 1, 3)) |> 
+  mutate(strategy = str_sub(strategy, 5, -1)) |> 
+  pivot_wider(names_from = ticker, values_from = stat)
+```
+
+
