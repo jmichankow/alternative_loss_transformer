@@ -484,11 +484,12 @@ do_test3 <- function(dt, use_logret = T, use_DM = T) {
     r1 <- diff(dt[, 2])/(lag(dt[, 2])[-1])
     r2 <- diff(dt[, 3])/(lag(dt[, 3])[-1])
   }
+ 
+  dfl <- 1
+  e1 <- r1 * dfl
+  e2 <- r2 * dfl
   
-  e1 <- r1
-  e2 <- r2
-  
-  # DM test or t-test
+  # DM test or other test
   if (use_DM) {
     result <- 
       dm.test(e1, e2, alternative = "two.sided", h = 1, 
@@ -497,8 +498,21 @@ do_test3 <- function(dt, use_logret = T, use_DM = T) {
     )
     result2 <- c(result$statistic, result$p.value) 
   } else {
-    result <- t.test(e1, e2, alternative = "two.sided")
-    result2 <- c(result$stat, result$p.value)
+    # standard t-test
+    #result <- t.test(e1, e2, alternative = "two.sided")
+    #result2 <- c(result$stat, result$p.value)
+    
+    # Test for differences in Sharpe
+    #ctr <- list(type = 2, ttype = 1, pBoot = 2, hac = F)
+    #result  <- PeerPerformance::sharpeTesting(e1, e2, control = ctr)
+    #result2 <- c(result$tstat, result$pval)
+    
+    # standard significance test for H0: alpha = 0  vs. H1: alpha <> 0
+    # in regression
+    m1 <- lm(e1~e2)
+    result <- summary(m1)$coefficients[1, c(3, 4)]
+    result2 <- c(result[1], result[2])
+
   }
   
   names(result2) <- c("stat", "pv")
@@ -511,7 +525,7 @@ Calling function:
 ```{r eval = F}
 
 use_logret = T
-use_DM = T
+use_DM = F
 
 # tran_bh
 dm_tran_bh <-
