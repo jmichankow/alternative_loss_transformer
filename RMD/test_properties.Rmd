@@ -1,0 +1,118 @@
+---
+title: "Test comparing two IRs"
+author: "Paweł Sakowski"
+date: "`r Sys.time()`"
+output: 
+  html_document:
+    number_sections: false
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F, warning = F, error = F, message = F, cache = F, 
+                      fig.width = 9, fig.height = 4.5)
+options(knitr.kable.NA = '')
+```
+
+```{r}
+library(tidyverse)
+library(here)
+source(here("FUNS/fun_getPerformanceStats.R"))
+```
+
+```{r}
+n <- 365
+mean1  <- 0.1 * (1/n)
+sigma1 <- 0.1 * sqrt(1/n)
+mean2  <- mean1
+sigma2 <- sigma1
+dt <- tibble(
+    r1 = rnorm(n, mean1, sigma1),
+    r2 = rnorm(n, mean2, sigma2),
+) |> 
+    mutate(
+        p1 = cumsum(exp(r1)),
+        p2 = cumsum(exp(r2)),
+        p1 = exp(cumsum(r1)),
+        p2 = exp(cumsum(r2)),
+        obs = row_number())
+```
+
+```{r}
+dt |> 
+    select(obs, p1, p2) |> 
+    pivot_longer(!obs) |> 
+    ggplot(aes(x = obs, y = value, col = name)) +
+    geom_line()
+rnorm()
+```
+
+```{r}
+ARC1 <- dt$p1 |> getARC(scale = 365)
+ARC2 <- dt$p2 |> getARC(scale = 365)
+ASD1 <- dt$p1 |> getASD(scale = 365)
+ASD2 <- dt$p2 |> getASD(scale = 365)
+
+IR1 <- ARC1/ASD1
+IR2 <- ARC2/ASD2
+
+IR1
+dt$p1 |> getIR(scale = 365)
+IR2
+dt$p2 |> getIR(scale = 365)
+
+sigma <- sd(dt$r1 - dt$r2)
+```
+
+
+```{r}
+gen_test_stat <- function(
+    n = 365,
+    mean1  = 0.1,
+    sigma1 = 0.1,
+    mean2  = 0.1,
+    sigma2 = 0.1 
+) {
+    
+    mean1  <- mean1 * (1/n)
+    sigma1 <- sigma1 * sqrt(1/n)
+    mean2  <- mean2 * (1/n)
+    sigma2 <- sigma2 * sqrt(1/n)
+
+    r1 <- rnorm(n, mean1, sigma1)
+    r2 <- rnorm(n, mean2, sigma2)
+
+    p1 <- exp(cumsum(r1))
+    p2 <- exp(cumsum(r2))
+
+    IR1 <- p1 |> getIR(scale = 365)
+    IR2 <- p2 |> getIR(scale = 365)
+
+    R1 <- diff(p1)/(lag(p1)[-1])
+    R2 <- diff(p2)/(lag(p2)[-1])
+
+    #sigma <- sd(R1 - R2)
+    #tat <- (IR1 - IR2) / (sigma / sqrt(n))
+    #stat <- (IR1 - IR2) / (sigma / sqrt(1))
+    stat <- PeerPerformance::sharpeTesting(R1, R2)$tstat
+    return(stat)
+}
+```
+
+```{r}
+stat_values <- 
+    replicate(
+        10000, 
+        gen_test_stat(mean1 = 0.1, mean2 = 0.1, 
+        sigma1 = 0.1, sigma2 = 0.1))
+quantile(stat_values, c(0.025, 0.5, 0.975))
+
+tibble(stat = stat_values) |> 
+    ggplot(aes(stat)) +
+    geom_histogram(fill = "pink", col = "black")
+```
+
+```{r}
+
+```
